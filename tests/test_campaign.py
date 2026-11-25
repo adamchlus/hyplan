@@ -381,6 +381,21 @@ class TestCampaignPersistence:
         assert loaded.groups[0]["name"] == "Coastal"
         assert loaded.groups[1]["name"] == "Inland"
 
+    def test_save_load_roundtrip_keeps_altitude_agl(self, tmp_path):
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        agl_line = _make_flight_line("AGL Line")
+        agl_line.terrain_elevation = ureg.Quantity(500, "meter")
+        c.add_flight_lines([agl_line, _make_flight_line("Plain Line")])
+
+        save_path = str(tmp_path / "agl_campaign")
+        c.save(save_path)
+        loaded = Campaign.load(save_path)
+
+        by_name = {fl.site_name: fl for fl in loaded.flight_lines}
+        assert by_name["AGL Line"].altitude_agl.m_as("meter") == pytest.approx(2500)
+        assert by_name["AGL Line"].terrain_elevation.m_as("meter") == pytest.approx(500)
+        assert by_name["Plain Line"].altitude_agl is None
+
     def test_load_no_api_calls(self, tmp_path):
         """Loading should never call the OpenAIP API."""
         c = Campaign("Test", bounds=SAMPLE_BOUNDS)

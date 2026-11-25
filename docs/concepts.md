@@ -13,6 +13,15 @@ HyPlan distinguishes between two altitude references:
   the sensor's ground footprint depends on height above the target, not above
   sea level.
 
+A `FlightLine` can also carry the mean terrain elevation under its nadir
+track, set by `FlightLine.sample_terrain(dem_file)` or automatically by
+Mode 3 of `box_around_polygon_terrain` (`target_agl`). When present,
+`FlightLine.altitude_agl` returns `altitude_msl` minus that mean, and
+`to_dict()`, `to_geojson()` and `to_gdf()` include an `altitude_agl` field
+(meters). `reverse()` keeps the terrain value; offsetting, rotating,
+clipping and splitting return lines without it, because the ground track
+changes. Call `sample_terrain` again on those lines if needed.
+
 Variable and parameter names throughout HyPlan include `_msl` or `_agl` to
 make the reference explicit. Over flat terrain near sea level the two are
 nearly identical, but over mountainous terrain or high-elevation sites the

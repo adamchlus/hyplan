@@ -341,7 +341,10 @@ def box_around_polygon_terrain(
     altitude for the box geometry; the Mode-2 global clearance pre-check is
     skipped, and per-line clearance is instead checked against the local
     maximum terrain (a warning is logged when it falls below
-    ``safe_altitude``).
+    ``safe_altitude``). Each returned line carries the mean terrain
+    elevation of its own track, so ``altitude_agl`` is set and exported.
+    Unclipped lines report exactly ``target_agl``; clipped segments are
+    resampled and report the AGL over their shorter track.
 
     Unlike :func:`box_around_polygon`, which uses a flat-earth
     ``swath_width()`` for line spacing, this function calls
@@ -499,6 +502,13 @@ def box_around_polygon_terrain(
             )
         else:
             output_segments = [candidate]
+
+        if mode3:
+            for seg in output_segments:
+                if seg is candidate:
+                    seg.terrain_elevation = ureg.Quantity(elev_stats["mean"], "meter")
+                else:
+                    seg.sample_terrain(dem_file)
 
         for seg in output_segments:
             seg.site_name = f"{box_name}_L{line_index + start_numbering:02d}_{flight_level}"

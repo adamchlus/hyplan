@@ -1,7 +1,9 @@
 """Tests for hyplan.flight_line."""
 
 import pytest
+from shapely.geometry import box
 
+from hyplan.exceptions import HyPlanTypeError
 from hyplan.flight_line import FlightLine, to_gdf
 from hyplan.units import ureg
 
@@ -477,3 +479,145 @@ class TestToGDF:
         gdf = to_gdf([sample_flight_line, short_flight_line])
         assert len(gdf) == 2
         assert gdf.crs is not None
+
+
+class TestAltitudeAGL:
+    @pytest.fixture
+    def agl_line(self, sample_flight_line):
+        sample_flight_line.terrain_elevation = ureg.Quantity(1000, "meter")
+        return sample_flight_line
+
+    def test_default_has_no_terrain(self, sample_flight_line):
+        assert sample_flight_line.terrain_elevation is None
+        assert sample_flight_line.altitude_agl is None
+
+    def test_exports_unchanged_without_terrain(self, sample_flight_line):
+        assert "altitude_agl" not in sample_flight_line.to_dict()
+        assert "altitude_agl" not in sample_flight_line.to_geojson()["properties"]
+        assert "altitude_agl" not in to_gdf([sample_flight_line]).columns
+
+    def test_altitude_agl_value(self, agl_line):
+        assert agl_line.altitude_agl.m_as("meter") == pytest.approx(5000)
+
+    def test_altitude_agl_follows_altitude_msl(self, agl_line):
+        agl_line.altitude_msl = ureg.Quantity(4000, "meter")
+        assert agl_line.altitude_agl.m_as("meter") == pytest.approx(3000)
+
+    def test_altitude_agl_none_without_altitude_msl(self, agl_line):
+        agl_line.altitude_msl = None
+        assert agl_line.altitude_agl is None
+        assert "altitude_agl" not in agl_line.to_geojson()["properties"]
+
+    def test_terrain_elevation_converted_to_meters(self, sample_flight_line):
+        sample_flight_line.terrain_elevation = ureg.Quantity(1, "km")
+        assert sample_flight_line.terrain_elevation.units == ureg.meter
+        assert sample_flight_line.terrain_elevation.magnitude == pytest.approx(1000)
+
+    def test_terrain_elevation_plain_number_is_meters(self, sample_flight_line):
+        sample_flight_line.terrain_elevation = 250
+        assert sample_flight_line.terrain_elevation == ureg.Quantity(250, "meter")
+
+    def test_terrain_elevation_below_sea_level(self, sample_flight_line):
+        sample_flight_line.terrain_elevation = -400
+        assert sample_flight_line.altitude_agl.m_as("meter") == pytest.approx(6400)
+
+    @pytest.mark.parametrize("value", ["100", True, [100]])
+    def test_terrain_elevation_invalid_type_raises(self, sample_flight_line, value):
+        with pytest.raises(HyPlanTypeError):
+            sample_flight_line.terrain_elevation = value
+
+    def test_terrain_elevation_reset_to_none(self, agl_line):
+        agl_line.terrain_elevation = None
+        assert agl_line.altitude_agl is None
+
+    def test_to_dict_includes_altitude_agl(self, agl_line):
+        assert agl_line.to_dict()["altitude_agl"] == pytest.approx(5000)
+
+    def test_to_geojson_includes_altitude_agl(self, agl_line):
+        assert agl_line.to_geojson()["properties"]["altitude_agl"] == pytest.approx(5000)
+
+    def test_to_gdf_includes_altitude_agl(self, agl_line, short_flight_line):
+        gdf = to_gdf([agl_line, short_flight_line])
+        assert gdf["altitude_agl"].iloc[0] == pytest.approx(5000)
+        assert gdf["altitude_agl"].isna().iloc[1]
+
+    def test_from_geojson_restores_terrain(self, agl_line):
+        restored = FlightLine.from_geojson(agl_line.to_geojson())
+        assert restored.terrain_elevation.m_as("meter") == pytest.approx(1000)
+        assert restored.altitude_agl.m_as("meter") == pytest.approx(5000)
+
+    def test_from_geojson_roundtrip_equal(self, agl_line):
+        first = FlightLine.from_geojson(agl_line.to_geojson())
+        second = FlightLine.from_geojson(first.to_geojson())
+        assert first == second
+
+    def test_from_geojson_without_altitude_agl(self, sample_flight_line):
+        restored = FlightLine.from_geojson(sample_flight_line.to_geojson())
+        assert restored.terrain_elevation is None
+        assert restored.altitude_agl is None
+
+    def test_from_geojson_ignores_agl_without_msl(self, agl_line):
+        gj = agl_line.to_geojson()
+        gj["properties"]["altitude_msl"] = None
+        restored = FlightLine.from_geojson(gj)
+        assert restored.terrain_elevation is None
+
+    def test_eq_differs_on_terrain(self, short_flight_line):
+        a = FlightLine.from_geojson(short_flight_line.to_geojson())
+        b = FlightLine.from_geojson(short_flight_line.to_geojson())
+        assert a == b
+        a.terrain_elevation = ureg.Quantity(100, "meter")
+        assert a != b
+        b.terrain_elevation = ureg.Quantity(200, "meter")
+        assert a != b
+        b.terrain_elevation = ureg.Quantity(100, "meter")
+        assert a == b
+
+    def test_reverse_keeps_terrain(self, agl_line):
+        reversed_line = agl_line.reverse()
+        assert reversed_line.terrain_elevation == agl_line.terrain_elevation
+        assert reversed_line.altitude_agl.m_as("meter") == pytest.approx(5000)
+
+    def test_offset_north_east_drops_terrain(self, agl_line):
+        derived = agl_line.offset_north_east(ureg.Quantity(1, "km"), ureg.Quantity(1, "km"))
+        assert derived.terrain_elevation is None
+        assert derived.altitude_agl is None
+
+    def test_offset_across_drops_terrain(self, agl_line):
+        assert agl_line.offset_across(ureg.Quantity(1, "km")).terrain_elevation is None
+
+    def test_offset_along_drops_terrain(self, agl_line):
+        derived = agl_line.offset_along(ureg.Quantity(1, "km"), ureg.Quantity(-1, "km"))
+        assert derived.terrain_elevation is None
+
+    def test_rotate_drops_terrain(self, agl_line):
+        assert agl_line.rotate_around_midpoint(30.0).terrain_elevation is None
+
+    def test_split_drops_terrain(self, agl_line):
+        segments = agl_line.split_by_length(ureg.Quantity(10, "km"))
+        assert len(segments) > 1
+        assert all(seg.terrain_elevation is None for seg in segments)
+
+    def test_partial_clip_drops_terrain(self, agl_line):
+        segments = agl_line.clip_to_polygon(box(-118.3, 34.0, -118.0, 34.25))
+        assert segments
+        assert all(seg.terrain_elevation is None for seg in segments)
+
+    def test_parent_unchanged_by_derived_line(self, agl_line):
+        agl_line.offset_across(ureg.Quantity(1, "km"))
+        agl_line.reverse().terrain_elevation = ureg.Quantity(0, "meter")
+        assert agl_line.terrain_elevation == ureg.Quantity(1000, "meter")
+
+    def test_sample_terrain(self, sample_flight_line, monkeypatch):
+        calls = []
+
+        def fake_along_track(flight_line, dem_file, precision=100.0):
+            calls.append((flight_line, dem_file, precision))
+            return {"min": 800.0, "mean": 1200.0, "max": 1500.0}
+
+        monkeypatch.setattr("hyplan.terrain.terrain_elevation_along_track", fake_along_track)
+        result = sample_flight_line.sample_terrain("dem.tif", precision=50.0)
+        assert calls == [(sample_flight_line, "dem.tif", 50.0)]
+        assert result == ureg.Quantity(1200.0, "meter")
+        assert sample_flight_line.terrain_elevation == ureg.Quantity(1200.0, "meter")
+        assert sample_flight_line.altitude_agl.m_as("meter") == pytest.approx(4800)

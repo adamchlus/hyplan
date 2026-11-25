@@ -7,6 +7,14 @@
 - `hyplan.geometry.transform_geometry(func, geometry)`: vectorized
   replacement for `shapely.ops.transform`; accepts the transforms
   returned by `get_utm_transforms`.
+- `FlightLine.altitude_agl`: altitude above the mean terrain under the
+  nadir track, derived from a new optional `FlightLine.terrain_elevation`.
+  Set it with `FlightLine.sample_terrain(dem_file)`; Mode 3 of
+  `box_around_polygon_terrain` (`target_agl`) sets it on every returned
+  line, resampling clipped segments. When known, `to_dict()`,
+  `to_geojson()` and `to_gdf()` include `altitude_agl` (meters) and
+  `from_geojson()` restores it. `reverse()` keeps it; offset, rotate,
+  clip and split drop it. Output for lines without terrain is unchanged.
 
 ### Changed
 

@@ -45,8 +45,11 @@ class FlightLine:
     are derived from those waypoints.
 
     Altitude is stored as MSL (above mean sea level), which is the standard
-    aviation reference. Sensor calculations that depend on height above ground
-    (AGL) must account for terrain elevation separately.
+    aviation reference. A line can optionally carry the mean terrain
+    elevation under its nadir track (see :meth:`sample_terrain`), from which
+    :attr:`altitude_agl` is derived. Without terrain, ``altitude_agl`` is
+    ``None`` and sensor calculations that depend on height above ground
+    must account for terrain elevation separately.
 
     The constructor stores copies of the supplied waypoints, so a FlightLine
     is fully value-like: mutating the line (e.g. via the ``altitude_msl``
@@ -68,6 +71,7 @@ class FlightLine:
         self.site_name = site_name
         self.site_description = site_description
         self.investigator = investigator
+        self._terrain_elevation: Quantity | None = None
 
     def __repr__(self) -> str:
         alt = (
@@ -90,6 +94,7 @@ class FlightLine:
             and self.site_name == other.site_name
             and self.site_description == other.site_description
             and self.investigator == other.investigator
+            and _terrain_elevations_equal(self._terrain_elevation, other._terrain_elevation)
         )
 
     # ------------------------------------------------------------------
@@ -167,6 +172,44 @@ class FlightLine:
         validated = self._validate_altitude(value)
         self._waypoint1.altitude_msl = validated
         self._waypoint2.altitude_msl = validated
+
+    @property
+    def terrain_elevation(self) -> Quantity | None:
+        """Mean terrain elevation (m MSL) under the nadir track, or None.
+
+        Set by :meth:`sample_terrain`, by Mode 3 of
+        :func:`~hyplan.flight_box.box_around_polygon_terrain`, or directly.
+        Plain numbers are interpreted as meters. :meth:`reverse` keeps it;
+        every other derived-line method (offset, rotate, clip, split)
+        returns a line without it, because the ground track changes.
+        """
+        return self._terrain_elevation
+
+    @terrain_elevation.setter
+    def terrain_elevation(self, value: Quantity | float | None) -> None:
+        if value is None:
+            self._terrain_elevation = None
+            return
+        if isinstance(value, Quantity):
+            self._terrain_elevation = value.to("meter")
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            self._terrain_elevation = ureg.Quantity(float(value), "meter")
+        else:
+            raise HyPlanTypeError(
+                f"terrain_elevation must be a Quantity, a number (meters) or None, got {type(value).__name__}"
+            )
+
+    @property
+    def altitude_agl(self) -> Quantity | None:
+        """Altitude above the mean terrain under the nadir track.
+
+        ``altitude_msl - terrain_elevation`` in meters, or None when either
+        is unknown. Derived on access, so it follows changes to
+        ``altitude_msl``.
+        """
+        if self.altitude_msl is None or self._terrain_elevation is None:
+            return None
+        return (self.altitude_msl - self._terrain_elevation).to("meter")
 
     @property
     def lat1(self) -> float:
@@ -404,6 +447,8 @@ class FlightLine:
         The feature must have a ``LineString`` geometry with at least two
         coordinates.  Properties ``altitude_msl``, ``site_name``,
         ``site_description``, and ``investigator`` are read if present.
+        If both ``altitude_msl`` and ``altitude_agl`` are present, the
+        terrain elevation is restored as ``altitude_msl - altitude_agl``.
 
         Args:
             feature: GeoJSON Feature dict[Any, Any] with LineString geometry.
@@ -441,13 +486,17 @@ class FlightLine:
             heading=(float(az21) + 180.0) % 360,
             altitude_msl=alt,
         )
-        return cls(
+        line = cls(
             waypoint1=wp1,
             waypoint2=wp2,
             site_name=props.get("site_name"),
             site_description=props.get("site_description"),
             investigator=props.get("investigator"),
         )
+        agl_m = props.get("altitude_agl")
+        if alt_m is not None and agl_m is not None:
+            line.terrain_elevation = ureg.Quantity(float(alt_m) - float(agl_m), "meter")
+        return line
 
     # ------------------------------------------------------------------
     # Transform methods
@@ -575,7 +624,30 @@ class FlightLine:
             FlightLine: A new FlightLine object with reversed direction.
         """
         reversed_geom = LineString(list(reversed(self.geometry.coords)))
-        return self._from_geometry(reversed_geom)
+        reversed_line = self._from_geometry(reversed_geom)
+        reversed_line.terrain_elevation = self._terrain_elevation
+        return reversed_line
+
+    def sample_terrain(self, dem_file: str, precision: float = 100.0) -> Quantity:
+        """Sample the DEM along the nadir track and store the mean elevation.
+
+        Sets :attr:`terrain_elevation`, which enables :attr:`altitude_agl`
+        and the ``altitude_agl`` field in :meth:`to_dict` and
+        :meth:`to_geojson`.
+
+        Args:
+            dem_file: Path to a DEM GeoTIFF covering the flight line.
+            precision: Along-track sampling interval in meters. Default 100 m.
+
+        Returns:
+            The stored mean terrain elevation (m MSL).
+        """
+        from .terrain import terrain_elevation_along_track
+
+        stats = terrain_elevation_along_track(self, dem_file, precision=precision)
+        elevation = ureg.Quantity(stats["mean"], "meter")
+        self.terrain_elevation = elevation
+        return elevation
 
     def offset_north_east(self, offset_north: Quantity, offset_east: Quantity) -> FlightLine:
         """
@@ -781,8 +853,10 @@ class FlightLine:
         Returns:
             Dict: Dictionary with keys for geometry coordinates, endpoints,
                 length (meters), altitude (meters), and metadata fields.
+                ``altitude_agl`` (meters) is included only when
+                :attr:`altitude_agl` is known.
         """
-        return {
+        data: dict[Any, Any] = {
             "geometry": list(self.geometry.coords),
             "lat1": self.lat1,
             "lon1": self.lon1,
@@ -794,6 +868,10 @@ class FlightLine:
             "site_description": self.site_description,
             "investigator": self.investigator,
         }
+        altitude_agl = self.altitude_agl
+        if altitude_agl is not None:
+            data["altitude_agl"] = altitude_agl.magnitude
+        return data
 
     def to_geojson(self) -> dict[Any, Any]:
         """
@@ -802,8 +880,10 @@ class FlightLine:
         Returns:
             Dict: GeoJSON Feature with LineString geometry and properties
                 including altitude, site name, description, and investigator.
+                ``altitude_agl`` (meters) is included only when
+                :attr:`altitude_agl` is known.
         """
-        return {
+        feature: dict[Any, Any] = {
             "type": "Feature",
             "geometry": {
                 "type": "LineString",
@@ -816,6 +896,21 @@ class FlightLine:
                 "investigator": self.investigator,
             },
         }
+        altitude_agl = self.altitude_agl
+        if altitude_agl is not None:
+            feature["properties"]["altitude_agl"] = altitude_agl.magnitude
+        return feature
+
+
+def _terrain_elevations_equal(a: Quantity | None, b: Quantity | None) -> bool:
+    """Compare optional terrain elevations to within 1 micrometer.
+
+    The tolerance absorbs float error from the GeoJSON round trip, where
+    terrain is restored as ``altitude_msl - altitude_agl``.
+    """
+    if a is None or b is None:
+        return a is b
+    return bool(np.isclose(a.m_as("meter"), b.m_as("meter"), rtol=0.0, atol=1e-6))
 
 
 def _copy_waypoint(wp: Waypoint) -> Waypoint:

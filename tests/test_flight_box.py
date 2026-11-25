@@ -235,6 +235,48 @@ class TestBoxAroundPolygonTerrain:
                 polygon=self.poly,
             )
 
+    def test_mode2_has_no_altitude_agl(self):
+        lines = box_around_polygon_terrain(
+            instrument=AVIRIS3(),
+            altitude_msl=self.altitude,
+            polygon=self.poly,
+            azimuth=0.0,
+            overlap=20,
+        )
+        assert len(lines) > 0
+        assert all(fl.altitude_agl is None for fl in lines)
+        assert all("altitude_agl" not in fl.to_geojson()["properties"] for fl in lines)
+
+    def test_mode3_unclipped_altitude_agl_equals_target(self):
+        target = ureg.Quantity(3000, "meter")
+        lines = box_around_polygon_terrain(
+            instrument=AVIRIS3(),
+            altitude_msl=self.altitude,
+            polygon=self.poly,
+            azimuth=0.0,
+            overlap=20,
+            target_agl=target,
+            clip_to_polygon=False,
+        )
+        assert len(lines) > 0
+        for fl in lines:
+            assert fl.altitude_agl.m_as("meter") == pytest.approx(3000)
+            assert fl.to_geojson()["properties"]["altitude_agl"] == pytest.approx(3000)
+
+    def test_mode3_clipped_segments_resampled(self):
+        lines = box_around_polygon_terrain(
+            instrument=AVIRIS3(),
+            altitude_msl=self.altitude,
+            polygon=self.poly,
+            azimuth=0.0,
+            overlap=20,
+            target_agl=ureg.Quantity(3000, "meter"),
+        )
+        assert len(lines) > 0
+        for fl in lines:
+            assert fl.terrain_elevation is not None
+            assert fl.altitude_agl.m_as("meter") == pytest.approx(3000, abs=200)
+
     def test_insufficient_clearance(self):
         # Terrain in Mojave is ~600–900 m; 100 m MSL is below it
         with pytest.raises(HyPlanValueError, match="clearance"):
