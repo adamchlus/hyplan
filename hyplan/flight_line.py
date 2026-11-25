@@ -13,7 +13,9 @@ derived automatically from the geodesic geometry via Vincenty's formulae.
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import geopandas as gpd
@@ -35,6 +37,20 @@ __all__ = [
     "to_gdf",
 ]
 
+_RESERVED_METADATA_KEYS = frozenset({
+    "geometry",
+    "lat1",
+    "lon1",
+    "lat2",
+    "lon2",
+    "length",
+    "altitude_msl",
+    "altitude_agl",
+    "site_name",
+    "site_description",
+    "investigator",
+})
+
 
 class FlightLine:
     """
@@ -54,6 +70,22 @@ class FlightLine:
     The constructor stores copies of the supplied waypoints, so a FlightLine
     is fully value-like: mutating the line (e.g. via the ``altitude_msl``
     setter) never writes through to caller-owned Waypoint objects.
+
+    ``metadata`` holds arbitrary user-defined fields (e.g. ``campaign``,
+    ``aircraft``, ``priority``). Keys must be strings and must not be one
+    of the built-in field names (``geometry``, ``lat1``, ``lon1``,
+    ``lat2``, ``lon2``, ``length``, ``altitude_msl``, ``altitude_agl``,
+    ``site_name``, ``site_description``, ``investigator``). Values must be
+    JSON-serializable without NaN or infinity; scalars (str, int, float,
+    bool, None) are the intended use. numpy scalars are converted to
+    Python values, and values are stored in their JSON form (tuples
+    become lists). The line keeps its own copy, every derived line
+    (reverse, offset, rotate, clip, split) gets an independent copy, and
+    the keys are written flat into :meth:`to_dict`, :meth:`to_geojson`
+    and :func:`to_gdf`. ``metadata`` is a plain dict and may be edited
+    in place; it is validated again on export and when a derived line is
+    created, and invalid content raises
+    :class:`~hyplan.exceptions.HyPlanValueError`.
     """
     def __init__(
         self,
@@ -62,6 +94,7 @@ class FlightLine:
         site_name: str | None = None,
         site_description: str | None = None,
         investigator: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         if not is_waypoint(waypoint1) or not is_waypoint(waypoint2):
             raise HyPlanTypeError("waypoint1 and waypoint2 must be Waypoint objects.")
@@ -71,6 +104,7 @@ class FlightLine:
         self.site_name = site_name
         self.site_description = site_description
         self.investigator = investigator
+        self.metadata: dict[str, Any] = _normalize_metadata(metadata)
         self._terrain_elevation: Quantity | None = None
 
     def __repr__(self) -> str:
@@ -94,6 +128,7 @@ class FlightLine:
             and self.site_name == other.site_name
             and self.site_description == other.site_description
             and self.investigator == other.investigator
+            and self.metadata == other.metadata
             and _terrain_elevations_equal(self._terrain_elevation, other._terrain_elevation)
         )
 
@@ -136,6 +171,7 @@ class FlightLine:
             site_name=site_name or self.site_name,
             site_description=self.site_description,
             investigator=self.investigator,
+            metadata=self.metadata,
         )
 
     # ------------------------------------------------------------------
@@ -298,6 +334,7 @@ class FlightLine:
         site_name: str | None = None,
         site_description: str | None = None,
         investigator: str | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> FlightLine:
         """Create a flight line from a start point, length, and azimuth.
@@ -311,6 +348,7 @@ class FlightLine:
             site_name: Optional site name.
             site_description: Optional site description.
             investigator: Optional investigator name.
+            metadata: Optional user-defined fields; see :class:`FlightLine`.
 
         Returns:
             A new FlightLine extending from (lat1, lon1) along the given azimuth.
@@ -337,7 +375,7 @@ class FlightLine:
 
         return cls(waypoint1=wp1, waypoint2=wp2,
                    site_name=site_name, site_description=site_description,
-                   investigator=investigator)
+                   investigator=investigator, metadata=metadata)
 
     @classmethod
     def from_endpoints(
@@ -350,6 +388,7 @@ class FlightLine:
         site_name: str | None = None,
         site_description: str | None = None,
         investigator: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> FlightLine:
         """Create a flight line from two endpoint coordinates.
 
@@ -362,6 +401,7 @@ class FlightLine:
             site_name: Optional site name.
             site_description: Optional site description.
             investigator: Optional investigator name.
+            metadata: Optional user-defined fields; see :class:`FlightLine`.
 
         Returns:
             A new FlightLine from ``(lat1, lon1)`` to ``(lat2, lon2)``.
@@ -381,7 +421,7 @@ class FlightLine:
 
         return cls(waypoint1=wp1, waypoint2=wp2,
                    site_name=site_name, site_description=site_description,
-                   investigator=investigator)
+                   investigator=investigator, metadata=metadata)
 
     @classmethod
     def center_length_azimuth(
@@ -394,6 +434,7 @@ class FlightLine:
         site_name: str | None = None,
         site_description: str | None = None,
         investigator: str | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> FlightLine:
         """Create a flight line centered on a point, extending equally in both directions.
@@ -407,6 +448,7 @@ class FlightLine:
             site_name: Optional site name.
             site_description: Optional site description.
             investigator: Optional investigator name.
+            metadata: Optional user-defined fields; see :class:`FlightLine`.
 
         Returns:
             A new FlightLine centered on (lat, lon) along the given azimuth.
@@ -438,7 +480,7 @@ class FlightLine:
 
         return cls(waypoint1=wp1, waypoint2=wp2,
                    site_name=site_name, site_description=site_description,
-                   investigator=investigator)
+                   investigator=investigator, metadata=metadata)
 
     @classmethod
     def from_geojson(cls, feature: dict[Any, Any]) -> FlightLine:
@@ -449,6 +491,13 @@ class FlightLine:
         ``site_description``, and ``investigator`` are read if present.
         If both ``altitude_msl`` and ``altitude_agl`` are present, the
         terrain elevation is restored as ``altitude_msl - altitude_agl``.
+        Every other property goes into :attr:`metadata`.
+
+        GeoJSON from :meth:`~hyplan.pattern.Pattern.to_geojson` or
+        :meth:`~hyplan.campaign.Campaign.flight_lines_to_geojson` also
+        carries ``line_id``, ``pattern_id`` and ``pattern_kind``; those
+        end up in ``metadata`` too, so remove them from the properties
+        first if unwanted.
 
         Args:
             feature: GeoJSON Feature dict[Any, Any] with LineString geometry.
@@ -492,6 +541,10 @@ class FlightLine:
             site_name=props.get("site_name"),
             site_description=props.get("site_description"),
             investigator=props.get("investigator"),
+            metadata={
+                key: value for key, value in props.items()
+                if key not in _RESERVED_METADATA_KEYS
+            },
         )
         agl_m = props.get("altitude_agl")
         if alt_m is not None and agl_m is not None:
@@ -854,7 +907,11 @@ class FlightLine:
             Dict: Dictionary with keys for geometry coordinates, endpoints,
                 length (meters), altitude (meters), and metadata fields.
                 ``altitude_agl`` (meters) is included only when
-                :attr:`altitude_agl` is known.
+                :attr:`altitude_agl` is known. :attr:`metadata` keys are
+                merged in flat.
+
+        Raises:
+            HyPlanValueError: If :attr:`metadata` is invalid.
         """
         data: dict[Any, Any] = {
             "geometry": list(self.geometry.coords),
@@ -871,6 +928,7 @@ class FlightLine:
         altitude_agl = self.altitude_agl
         if altitude_agl is not None:
             data["altitude_agl"] = altitude_agl.magnitude
+        data.update(_normalize_metadata(self.metadata))
         return data
 
     def to_geojson(self) -> dict[Any, Any]:
@@ -881,7 +939,11 @@ class FlightLine:
             Dict: GeoJSON Feature with LineString geometry and properties
                 including altitude, site name, description, and investigator.
                 ``altitude_agl`` (meters) is included only when
-                :attr:`altitude_agl` is known.
+                :attr:`altitude_agl` is known. :attr:`metadata` keys are
+                merged into the properties flat.
+
+        Raises:
+            HyPlanValueError: If :attr:`metadata` is invalid.
         """
         feature: dict[Any, Any] = {
             "type": "Feature",
@@ -899,7 +961,46 @@ class FlightLine:
         altitude_agl = self.altitude_agl
         if altitude_agl is not None:
             feature["properties"]["altitude_agl"] = altitude_agl.magnitude
+        feature["properties"].update(_normalize_metadata(self.metadata))
         return feature
+
+
+def _numpy_scalar_to_python(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _normalize_metadata(metadata: object) -> dict[str, Any]:
+    """Validate metadata and return an independent, JSON-normalized copy.
+
+    Raises:
+        HyPlanTypeError: If ``metadata`` is not a dict (or None).
+        HyPlanValueError: If a key is not a string or is reserved, or a
+            value is not JSON-serializable (NaN and infinity included).
+    """
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, Mapping):
+        raise HyPlanTypeError(
+            f"metadata must be a dict or None, got {type(metadata).__name__}"
+        )
+    for key in metadata:
+        if not isinstance(key, str):
+            raise HyPlanValueError(f"metadata keys must be strings, got {key!r}")
+        if key in _RESERVED_METADATA_KEYS:
+            raise HyPlanValueError(
+                f"metadata key '{key}' is reserved; reserved keys are "
+                f"{sorted(_RESERVED_METADATA_KEYS)}"
+            )
+    try:
+        encoded = json.dumps(dict(metadata), allow_nan=False, default=_numpy_scalar_to_python)
+    except (TypeError, ValueError) as e:
+        raise HyPlanValueError(
+            f"metadata values must be JSON-serializable without NaN or infinity: {e}"
+        ) from e
+    normalized: dict[str, Any] = json.loads(encoded)
+    return normalized
 
 
 def _terrain_elevations_equal(a: Quantity | None, b: Quantity | None) -> bool:

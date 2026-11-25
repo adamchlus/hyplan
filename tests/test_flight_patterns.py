@@ -989,6 +989,31 @@ class TestPatternMovement:
             2 * pivot_lon - (-118.0), abs=1e-3,
         )
 
+    def _lawnmower_with_metadata(self):
+        pat = self._lawnmower()
+        for fl in pat.lines.values():
+            fl.metadata = {"campaign": "X", "tags": ["a"]}
+        return pat
+
+    def test_rotate_keeps_metadata(self):
+        pat = self._lawnmower_with_metadata()
+        rotated = pat.rotate(90.0)
+        assert all(fl.metadata == {"campaign": "X", "tags": ["a"]} for fl in rotated.lines.values())
+        next(iter(rotated.lines.values())).metadata["tags"].append("b")
+        assert all(fl.metadata == {"campaign": "X", "tags": ["a"]} for fl in pat.lines.values())
+
+    def test_translate_keeps_metadata(self):
+        pat = self._lawnmower_with_metadata()
+        moved = pat.translate(ureg.Quantity(10, "km"), ureg.Quantity(5, "km"))
+        assert all(fl.metadata == {"campaign": "X", "tags": ["a"]} for fl in moved.lines.values())
+        next(iter(moved.lines.values())).metadata["tags"].append("b")
+        assert all(fl.metadata == {"campaign": "X", "tags": ["a"]} for fl in pat.lines.values())
+
+    def test_to_dict_from_dict_keeps_metadata(self):
+        pat = self._lawnmower_with_metadata()
+        restored = Pattern.from_dict(pat.to_dict())
+        assert all(fl.metadata == {"campaign": "X", "tags": ["a"]} for fl in restored.lines.values())
+
     def test_from_relative_offsets_generator(self):
         anchor = (34.0, -118.0)
         pat = Pattern.from_relative(

@@ -15,6 +15,16 @@
   `to_geojson()` and `to_gdf()` include `altitude_agl` (meters) and
   `from_geojson()` restores it. `reverse()` keeps it; offset, rotate,
   clip and split drop it. Output for lines without terrain is unchanged.
+- `FlightLine.metadata`: user-defined per-line fields, set with the new
+  `metadata=` argument on `FlightLine()`, `start_length_azimuth`,
+  `from_endpoints` and `center_length_azimuth`. Keys are strings and may
+  not be built-in field names; values must be JSON-serializable (numpy
+  scalars are converted). Written flat by `to_dict()`, `to_geojson()` and
+  `to_gdf()`, read back by `from_geojson()` (every non-built-in property),
+  copied independently to every derived line and by `Pattern.rotate`, and
+  kept by `Campaign` save/load. Invalid metadata raises `HyPlanValueError`
+  on export; `Campaign.save()` checks every line before writing. Output
+  for lines without metadata is unchanged.
 
 ### Changed
 

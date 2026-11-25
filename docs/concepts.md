@@ -27,6 +27,44 @@ make the reference explicit. Over flat terrain near sea level the two are
 nearly identical, but over mountainous terrain or high-elevation sites the
 distinction matters.
 
+## Flight line metadata
+
+A `FlightLine` can carry user-defined fields in `metadata`, a plain dict:
+
+```python
+from hyplan.flight_line import FlightLine, to_gdf
+from hyplan.units import ureg
+
+line = FlightLine.from_endpoints(
+    lat1=34.0, lon1=-118.0, lat2=34.3, lon2=-117.7,
+    altitude_msl=ureg.Quantity(6000, "meter"),
+    site_name="L01",
+    metadata={"campaign": "SHIFT", "aircraft": "ER-2", "priority": 1},
+)
+line.to_geojson()["properties"]["campaign"]  # "SHIFT"
+```
+
+- Keys must be strings and must not be a built-in field name
+  (`geometry`, `lat1`, `lon1`, `lat2`, `lon2`, `length`, `altitude_msl`,
+  `altitude_agl`, `site_name`, `site_description`, `investigator`).
+- Values must be JSON-serializable without NaN or infinity. Scalars
+  (str, int, float, bool, None) are the intended use. numpy scalars are
+  converted to Python values; tuples are stored as lists.
+- `to_dict()`, `to_geojson()` and `to_gdf()` write the keys flat next to
+  the built-in fields. `from_geojson()` puts every property that is not a
+  built-in field into `metadata`.
+- Every derived line (`reverse`, `offset_*`, `rotate_around_midpoint`,
+  `clip_to_polygon`, `split_by_length`) gets an independent copy.
+- Edits to `line.metadata` are validated on export and when a derived
+  line is created; invalid content raises `HyPlanValueError`.
+- `Campaign.save()` validates every line before writing any file, and
+  `Campaign.load()` restores metadata without the campaign's `line_id`.
+- GeoJSON from `Pattern.to_geojson()` or
+  `Campaign.flight_lines_to_geojson()` also carries `line_id`,
+  `pattern_id` and `pattern_kind`. Reading it back with
+  `FlightLine.from_geojson()` puts those into `metadata`; remove them
+  from the properties first if unwanted.
+
 ## Sensor hierarchy
 
 All sensors derive from the {class}`~hyplan.instruments.Sensor` base class:

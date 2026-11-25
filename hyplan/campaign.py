@@ -574,11 +574,28 @@ class Campaign:
         """Save the campaign to a folder.
 
         Creates the directory structure and writes all files.
-        Existing files are overwritten.
+        Existing files are overwritten. Every flight line's metadata is
+        validated before anything is written.
 
         Args:
             path: Path to the campaign folder.
+
+        Raises:
+            HyPlanValueError: If any flight line has invalid metadata, or a
+                free-standing line has a ``line_id`` metadata key (that
+                property is written by the Campaign itself).
         """
+        for lid, fl in self._flight_lines.items():
+            if "line_id" in fl.to_geojson()["properties"]:
+                raise HyPlanValueError(
+                    f"Flight line '{lid}' has a 'line_id' metadata key, which "
+                    "conflicts with the campaign line ID written on save."
+                )
+        for pattern in self._patterns.values():
+            if pattern.is_line_based:
+                for fl in pattern.lines.values():
+                    fl.to_geojson()
+
         os.makedirs(path, exist_ok=True)
 
         # campaign.json
@@ -712,7 +729,11 @@ class Campaign:
             fc = _read_json(fl_file)
             for feature in fc.get("features", []):
                 line_id = feature.get("id") or feature["properties"].get("line_id")
-                fl = FlightLine.from_geojson(feature)
+                properties = {
+                    key: value for key, value in feature.get("properties", {}).items()
+                    if key != "line_id"
+                }
+                fl = FlightLine.from_geojson({**feature, "properties": properties})
                 campaign._flight_lines[line_id] = fl
             logger.info("Loaded %d flight lines from %s", len(campaign._flight_lines), fl_file)
 

@@ -431,6 +431,7 @@ class Pattern:
                 site_name=fl.site_name,
                 site_description=fl.site_description,
                 investigator=fl.investigator,
+                metadata=fl.metadata,
             )
 
         new_lines = {lid: _rotate_flight_line(fl) for lid, fl in self.lines.items()}

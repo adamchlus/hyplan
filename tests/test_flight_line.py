@@ -1,11 +1,15 @@
 """Tests for hyplan.flight_line."""
 
+import datetime
+
+import numpy as np
 import pytest
 from shapely.geometry import box
 
-from hyplan.exceptions import HyPlanTypeError
+from hyplan.exceptions import HyPlanTypeError, HyPlanValueError
 from hyplan.flight_line import FlightLine, to_gdf
 from hyplan.units import ureg
+from hyplan.waypoint import Waypoint
 
 
 class TestFlightLineCreation:
@@ -621,3 +625,299 @@ class TestAltitudeAGL:
         assert result == ureg.Quantity(1200.0, "meter")
         assert sample_flight_line.terrain_elevation == ureg.Quantity(1200.0, "meter")
         assert sample_flight_line.altitude_agl.m_as("meter") == pytest.approx(4800)
+
+
+RESERVED_KEYS = [
+    "geometry", "lat1", "lon1", "lat2", "lon2", "length", "altitude_msl",
+    "altitude_agl", "site_name", "site_description", "investigator",
+]
+
+FIXED_DICT_KEYS = {
+    "geometry", "lat1", "lon1", "lat2", "lon2", "length", "altitude_msl",
+    "site_name", "site_description", "investigator",
+}
+
+FIXED_GEOJSON_KEYS = {"altitude_msl", "site_name", "site_description", "investigator"}
+
+
+def _meta_line(metadata=None):
+    return FlightLine.from_endpoints(
+        lat1=34.0, lon1=-118.0, lat2=34.3, lon2=-117.7,
+        altitude_msl=ureg.Quantity(6000, "meter"),
+        site_name="Meta Line",
+        metadata=metadata,
+    )
+
+
+class TestMetadataConstruction:
+    def test_default_is_empty_dict(self, sample_flight_line):
+        assert sample_flight_line.metadata == {}
+
+    def test_init(self):
+        wp1 = Waypoint(latitude=34.0, longitude=-118.0, heading=90.0,
+                       altitude_msl=ureg.Quantity(3000, "meter"))
+        wp2 = Waypoint(latitude=34.0, longitude=-117.9, heading=90.0,
+                       altitude_msl=ureg.Quantity(3000, "meter"))
+        fl = FlightLine(wp1, wp2, metadata={"campaign": "X"})
+        assert fl.metadata == {"campaign": "X"}
+
+    def test_start_length_azimuth(self):
+        fl = FlightLine.start_length_azimuth(
+            lat1=34.0, lon1=-118.0, length=ureg.Quantity(10, "km"), az=90.0,
+            metadata={"campaign": "X"},
+        )
+        assert fl.metadata == {"campaign": "X"}
+
+    def test_from_endpoints(self):
+        assert _meta_line({"campaign": "X"}).metadata == {"campaign": "X"}
+
+    def test_center_length_azimuth(self):
+        fl = FlightLine.center_length_azimuth(
+            lat=34.0, lon=-118.0, length=ureg.Quantity(10, "km"), az=90.0,
+            metadata={"campaign": "X"},
+        )
+        assert fl.metadata == {"campaign": "X"}
+
+    def test_stored_copy_is_independent_of_input(self):
+        source = {"tags": ["a", "b"], "priority": 1}
+        fl = _meta_line(source)
+        source["tags"].append("c")
+        source["priority"] = 2
+        assert fl.metadata == {"tags": ["a", "b"], "priority": 1}
+
+    def test_scalar_types_preserved(self):
+        metadata = {"s": "x", "i": 1, "f": 1.5, "b": True, "n": None}
+        assert _meta_line(metadata).metadata == metadata
+
+    @pytest.mark.parametrize("key", RESERVED_KEYS)
+    def test_reserved_key_raises(self, key):
+        with pytest.raises(HyPlanValueError, match="reserved"):
+            _meta_line({key: "x"})
+
+    @pytest.mark.parametrize("key", [1, 1.5, ("a", "b"), None])
+    def test_non_string_key_raises(self, key):
+        with pytest.raises(HyPlanValueError, match="keys must be strings"):
+            _meta_line({key: "x"})
+
+    @pytest.mark.parametrize("value", [["campaign", "X"], "campaign", 1])
+    def test_non_dict_raises(self, value):
+        with pytest.raises(HyPlanTypeError, match="metadata must be a dict"):
+            _meta_line(value)
+
+    @pytest.mark.parametrize("value", [
+        datetime.datetime(2026, 1, 1),
+        object(),
+        {1, 2},
+        float("nan"),
+        float("inf"),
+        np.float64("nan"),
+        [1.0, float("-inf")],
+        np.array([1, 2]),
+    ])
+    def test_non_json_value_raises(self, value):
+        with pytest.raises(HyPlanValueError, match="JSON-serializable"):
+            _meta_line({"v": value})
+
+    def test_numpy_scalars_converted(self):
+        fl = _meta_line({
+            "i": np.int64(3), "f32": np.float32(1.5), "f64": np.float64(2.5),
+            "b": np.bool_(True), "nested": [np.int32(1)],
+        })
+        assert fl.metadata == {"i": 3, "f32": 1.5, "f64": 2.5, "b": True, "nested": [1]}
+        assert type(fl.metadata["i"]) is int
+        assert type(fl.metadata["f32"]) is float
+        assert type(fl.metadata["f64"]) is float
+        assert type(fl.metadata["b"]) is bool
+        assert type(fl.metadata["nested"][0]) is int
+
+    def test_tuple_stored_as_list(self):
+        assert _meta_line({"pair": (1, 2)}).metadata == {"pair": [1, 2]}
+
+
+class TestMetadataExport:
+    def test_exports_unchanged_without_metadata(self, sample_flight_line):
+        assert set(sample_flight_line.to_dict()) == FIXED_DICT_KEYS
+        assert set(sample_flight_line.to_geojson()["properties"]) == FIXED_GEOJSON_KEYS
+
+    def test_to_dict_flat(self):
+        data = _meta_line({"campaign": "X", "priority": 1}).to_dict()
+        assert data["campaign"] == "X"
+        assert data["priority"] == 1
+        assert set(data) == FIXED_DICT_KEYS | {"campaign", "priority"}
+
+    def test_to_geojson_flat(self):
+        props = _meta_line({"campaign": "X", "priority": 1}).to_geojson()["properties"]
+        assert props["campaign"] == "X"
+        assert props["priority"] == 1
+        assert set(props) == FIXED_GEOJSON_KEYS | {"campaign", "priority"}
+
+    def test_to_gdf_columns(self):
+        gdf = to_gdf([_meta_line({"campaign": "X"}), _meta_line({"priority": 2})])
+        assert gdf["campaign"].iloc[0] == "X"
+        assert gdf["campaign"].isna().iloc[1]
+        assert gdf["priority"].iloc[1] == 2
+        assert gdf["priority"].isna().iloc[0]
+
+    def test_with_altitude_agl(self):
+        fl = _meta_line({"campaign": "X"})
+        fl.terrain_elevation = ureg.Quantity(1000, "meter")
+        props = fl.to_geojson()["properties"]
+        assert props["altitude_agl"] == pytest.approx(5000)
+        assert props["campaign"] == "X"
+
+    def test_export_does_not_share_objects(self):
+        fl = _meta_line({"tags": ["a"]})
+        fl.to_geojson()["properties"]["tags"].append("b")
+        fl.to_dict()["tags"].append("c")
+        assert fl.metadata == {"tags": ["a"]}
+
+    def test_edits_after_construction_exported(self):
+        fl = _meta_line({"campaign": "X"})
+        fl.metadata["priority"] = np.int64(2)
+        del fl.metadata["campaign"]
+        props = fl.to_geojson()["properties"]
+        assert props["priority"] == 2
+        assert "campaign" not in props
+
+    @pytest.mark.parametrize("key, value, match", [
+        ("site_name", "x", "reserved"),
+        ("bad", object(), "JSON-serializable"),
+        ("bad", float("nan"), "JSON-serializable"),
+    ])
+    def test_invalid_edit_raises_on_export(self, key, value, match):
+        fl = _meta_line()
+        fl.metadata[key] = value
+        with pytest.raises(HyPlanValueError, match=match):
+            fl.to_geojson()
+        with pytest.raises(HyPlanValueError, match=match):
+            fl.to_dict()
+        with pytest.raises(HyPlanValueError, match=match):
+            to_gdf([fl])
+
+    def test_non_string_key_edit_raises_on_export(self):
+        fl = _meta_line()
+        fl.metadata[1] = "x"
+        with pytest.raises(HyPlanValueError, match="keys must be strings"):
+            fl.to_geojson()
+
+    def test_acceptance_example(self):
+        assert FlightLine.from_endpoints(
+            34.0, -118.0, 34.3, -117.7, metadata={"campaign": "X"},
+        ).to_geojson()["properties"]["campaign"] == "X"
+
+
+class TestMetadataFromGeoJSON:
+    def test_extra_properties_become_metadata(self):
+        fl = _meta_line()
+        gj = fl.to_geojson()
+        gj["properties"].update({"campaign": "X", "priority": 1, "notes": None})
+        restored = FlightLine.from_geojson(gj)
+        assert restored.metadata == {"campaign": "X", "priority": 1, "notes": None}
+        assert restored.site_name == "Meta Line"
+
+    def test_no_extra_properties(self, sample_flight_line):
+        assert FlightLine.from_geojson(sample_flight_line.to_geojson()).metadata == {}
+
+    def test_no_properties(self):
+        feature = {
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [[-118.0, 34.0], [-117.9, 34.0]]},
+        }
+        assert FlightLine.from_geojson(feature).metadata == {}
+
+    def test_altitude_agl_not_in_metadata(self):
+        fl = _meta_line({"campaign": "X"})
+        fl.terrain_elevation = ureg.Quantity(1000, "meter")
+        restored = FlightLine.from_geojson(fl.to_geojson())
+        assert restored.metadata == {"campaign": "X"}
+        assert restored.altitude_agl.m_as("meter") == pytest.approx(5000)
+
+    def test_altitude_agl_without_msl_not_in_metadata(self):
+        gj = _meta_line({"campaign": "X"}).to_geojson()
+        gj["properties"]["altitude_msl"] = None
+        gj["properties"]["altitude_agl"] = 5000.0
+        assert FlightLine.from_geojson(gj).metadata == {"campaign": "X"}
+
+    def test_roundtrip_equal(self):
+        first = FlightLine.from_geojson(
+            _meta_line({"campaign": "X", "priority": 1.25, "tags": ["a"]}).to_geojson()
+        )
+        second = FlightLine.from_geojson(first.to_geojson())
+        assert first == second
+        assert second.metadata == {"campaign": "X", "priority": 1.25, "tags": ["a"]}
+
+    def test_pattern_keys_end_up_in_metadata(self):
+        gj = _meta_line().to_geojson()
+        gj["properties"].update({"line_id": "line_001", "pattern_id": "p", "pattern_kind": "k"})
+        assert FlightLine.from_geojson(gj).metadata == {
+            "line_id": "line_001", "pattern_id": "p", "pattern_kind": "k",
+        }
+
+
+class TestMetadataEquality:
+    def test_eq_differs_on_metadata(self):
+        base = FlightLine.from_geojson(_meta_line().to_geojson())
+        a = FlightLine.from_geojson(base.to_geojson())
+        b = FlightLine.from_geojson(base.to_geojson())
+        assert a == b
+        a.metadata["campaign"] = "X"
+        assert a != b
+        b.metadata["campaign"] = "Y"
+        assert a != b
+        b.metadata["campaign"] = "X"
+        assert a == b
+
+
+PROPAGATION_META = {"campaign": "X", "tags": ["a"]}
+
+
+class TestMetadataPropagation:
+    @pytest.mark.parametrize("derive", [
+        lambda fl: fl.reverse(),
+        lambda fl: fl.offset_north_east(ureg.Quantity(1, "km"), ureg.Quantity(1, "km")),
+        lambda fl: fl.offset_across(ureg.Quantity(1, "km")),
+        lambda fl: fl.offset_along(ureg.Quantity(1, "km"), ureg.Quantity(-1, "km")),
+        lambda fl: fl.rotate_around_midpoint(30.0),
+    ], ids=["reverse", "offset_north_east", "offset_across", "offset_along", "rotate"])
+    def test_derived_line_keeps_independent_copy(self, derive):
+        parent = _meta_line(PROPAGATION_META)
+        child = derive(parent)
+        assert child.metadata == PROPAGATION_META
+        child.metadata["tags"].append("b")
+        child.metadata["campaign"] = "Y"
+        assert parent.metadata == PROPAGATION_META
+
+    def test_split_keeps_independent_copies(self):
+        parent = _meta_line(PROPAGATION_META)
+        segments = parent.split_by_length(ureg.Quantity(10, "km"))
+        assert len(segments) > 1
+        assert all(seg.metadata == PROPAGATION_META for seg in segments)
+        segments[0].metadata["tags"].append("b")
+        assert parent.metadata == PROPAGATION_META
+        assert segments[1].metadata == PROPAGATION_META
+
+    def test_partial_clip_keeps_independent_copies(self):
+        parent = _meta_line(PROPAGATION_META)
+        segments = parent.clip_to_polygon(box(-118.1, 33.9, -117.85, 34.4))
+        assert segments
+        assert all(seg is not parent for seg in segments)
+        assert all(seg.metadata == PROPAGATION_META for seg in segments)
+        segments[0].metadata["tags"].append("b")
+        assert parent.metadata == PROPAGATION_META
+
+    def test_acceptance_value_survives(self):
+        fl = FlightLine.from_endpoints(34.0, -118.0, 34.3, -117.7, metadata={"campaign": "X"})
+        assert fl.reverse().to_geojson()["properties"]["campaign"] == "X"
+        assert all(
+            seg.to_geojson()["properties"]["campaign"] == "X"
+            for seg in fl.split_by_length(ureg.Quantity(10, "km"))
+        )
+        clipped = fl.clip_to_polygon(box(-118.1, 33.9, -117.85, 34.4))
+        assert clipped
+        assert all(seg.to_geojson()["properties"]["campaign"] == "X" for seg in clipped)
+
+    def test_derived_line_with_invalid_metadata_raises(self):
+        fl = _meta_line()
+        fl.metadata["bad"] = object()
+        with pytest.raises(HyPlanValueError, match="JSON-serializable"):
+            fl.reverse()

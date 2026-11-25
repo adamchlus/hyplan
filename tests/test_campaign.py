@@ -396,6 +396,90 @@ class TestCampaignPersistence:
         assert by_name["AGL Line"].terrain_elevation.m_as("meter") == pytest.approx(500)
         assert by_name["Plain Line"].altitude_agl is None
 
+    def test_save_load_roundtrip_keeps_metadata(self, tmp_path):
+        from hyplan.flight_patterns import rosette
+
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        meta_line = _make_flight_line("Meta Line")
+        meta_line.metadata = {"campaign": "X", "priority": 1}
+        c.add_flight_lines([meta_line, _make_flight_line("Plain Line")])
+        pat = rosette(
+            center=(34.0, -118.0), heading=0.0,
+            altitude=ureg.Quantity(3000, "meter"),
+            radius=ureg.Quantity(10, "km"),
+            n_lines=3,
+        )
+        for fl in pat.lines.values():
+            fl.metadata = {"campaign": "P"}
+        c.add_pattern(pat)
+
+        save_path = str(tmp_path / "meta_campaign")
+        c.save(save_path)
+        loaded = Campaign.load(save_path)
+
+        by_name = {fl.site_name: fl for fl in loaded.flight_lines}
+        assert by_name["Meta Line"].metadata == {"campaign": "X", "priority": 1}
+        assert by_name["Plain Line"].metadata == {}
+        loaded_pattern = loaded.patterns[0]
+        assert all(fl.metadata == {"campaign": "P"} for fl in loaded_pattern.lines.values())
+
+    def test_save_load_lines_equal(self, tmp_path):
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        fl = FlightLine.from_geojson(_make_flight_line("Eq Line").to_geojson())
+        fl.metadata = {"campaign": "X"}
+        c.add_flight_lines([fl])
+
+        save_path = str(tmp_path / "eq_campaign")
+        c.save(save_path)
+        loaded = Campaign.load(save_path)
+        assert loaded.flight_lines[0] == fl
+
+    def test_load_does_not_leak_line_id_into_metadata(self, tmp_path):
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        c.add_flight_lines([_make_flight_line()])
+        save_path = str(tmp_path / "lineid_campaign")
+        c.save(save_path)
+        loaded = Campaign.load(save_path)
+        assert loaded.flight_line_ids == ["line_001"]
+        assert "line_id" not in loaded.flight_lines[0].metadata
+
+    def test_save_rejects_line_id_metadata_before_writing(self, tmp_path):
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        fl = _make_flight_line()
+        fl.metadata["line_id"] = "mine"
+        c.add_flight_lines([fl])
+        save_path = tmp_path / "bad_campaign"
+        with pytest.raises(HyPlanValueError, match="line_id"):
+            c.save(str(save_path))
+        assert not save_path.exists()
+
+    def test_save_rejects_invalid_metadata_before_writing(self, tmp_path):
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        fl = _make_flight_line()
+        fl.metadata["bad"] = float("nan")
+        c.add_flight_lines([fl])
+        save_path = tmp_path / "bad_campaign"
+        with pytest.raises(HyPlanValueError, match="JSON-serializable"):
+            c.save(str(save_path))
+        assert not save_path.exists()
+
+    def test_save_rejects_invalid_pattern_metadata_before_writing(self, tmp_path):
+        from hyplan.flight_patterns import rosette
+
+        c = Campaign("Test", bounds=SAMPLE_BOUNDS)
+        pat = rosette(
+            center=(34.0, -118.0), heading=0.0,
+            altitude=ureg.Quantity(3000, "meter"),
+            radius=ureg.Quantity(10, "km"),
+            n_lines=3,
+        )
+        next(iter(pat.lines.values())).metadata["site_name"] = "x"
+        c.add_pattern(pat)
+        save_path = tmp_path / "bad_campaign"
+        with pytest.raises(HyPlanValueError, match="reserved"):
+            c.save(str(save_path))
+        assert not save_path.exists()
+
     def test_load_no_api_calls(self, tmp_path):
         """Loading should never call the OpenAIP API."""
         c = Campaign("Test", bounds=SAMPLE_BOUNDS)
